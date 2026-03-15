@@ -1,0 +1,74 @@
+{
+  "name": "MusIQ-Desktop-App",
+  "version": "1.0.0",
+  "description": "Mus-IQ Desktop App",
+  "main": "src/main/main.js",
+  "author": "Mus-IQ",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"npm run dev:renderer\" \"wait-on http://localhost:5173 && npm run dev:electron\"",
+    "dev:renderer": "npm run dev --prefix src/renderer",
+    "dev:electron": "cross-env NODE_ENV=development electron .",
+    "build:renderer": "npm run build --prefix src/renderer",
+    "build:electron": "electron-builder",
+    "dist": "npm run build:renderer && electron-builder --win",
+    "dist:publish": "npm run build:renderer && electron-builder --win --publish always",
+    "dist:mac": "npm run build:renderer && electron-builder --mac --publish always",
+    "dist:linux": "npm run build:renderer && electron-builder --linux --publish always",
+    "dist:all": "npm run build:renderer && electron-builder -wml --publish always"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.4",
+    "discord-rpc": "^4.0.1",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.1.7"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.musiq.desktop",
+    "productName": "Mus-IQ",
+    "publish": {
+      "provider": "github",
+      "owner": "collinbernardy08-star",
+      "repo": "musiq-desktop",
+      "releaseType": "release"
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/main/**/*",
+      "src/renderer/dist/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.music"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "assets/icon.png",
+      "category": "Audio"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
+    }
+  }
+}
