@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   release:
     runs-on: windows-latest
@@ -16,15 +19,18 @@ jobs:
       - name: Node.js setup
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 18
 
       - name: Install main dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Install renderer dependencies
-        run: npm install --prefix src/renderer
+        run: npm install --legacy-peer-deps --prefix src/renderer
+
+      - name: Build renderer
+        run: npm run build --prefix src/renderer
 
       - name: Build & Publish
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: npm run dist:publish
+        run: npx electron-builder --win --publish always
