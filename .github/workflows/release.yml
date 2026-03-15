@@ -21,6 +21,11 @@ jobs:
         with:
           node-version: 18
 
+      - name: Delete package-lock files
+        run: |
+          if (Test-Path "package-lock.json") { Remove-Item "package-lock.json" }
+          if (Test-Path "src/renderer/package-lock.json") { Remove-Item "src/renderer/package-lock.json" }
+
       - name: Install main dependencies
         run: npm install --legacy-peer-deps
 
