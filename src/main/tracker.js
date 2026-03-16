@@ -24,12 +24,50 @@ let lastSyncedDate = null;
 function log(msg) {
   console.log(`[Tracker] ${new Date().toISOString()} ${msg}`);
 }
-
-function logError(context, err) {
-  console.error(`[Tracker][ERROR][${context}] ${err?.message || err}`);
+function logError(ctx, err) {
+  console.error(`[Tracker][ERROR][${ctx}] ${err?.message || JSON.stringify(err)}`);
 }
 
-// ─── Supabase client ──────────────────────────────────────────────────────────
+// ─── Token management ─────────────────────────────────────────────────────────
+
+// ROOT CAUSE FIX: Central function that always returns a fresh, valid session.
+// Previously, syncToSupabase used a potentially expired token – now ALL
+// operations go through this function which refreshes automatically.
+async function getFreshSession() {
+  const session = store.get('session');
+  if (!session) return null;
+
+  // Check if token is about to expire (within 5 minutes)
+  const expiresAt = session.expires_at; // unix timestamp in seconds
+  const nowSec = Math.floor(Date.now() / 1000);
+  const needsRefresh = !expiresAt || expiresAt - nowSec < 300;
+
+  if (needsRefresh) {
+    if (!session.refresh_token) {
+      logError('getFreshSession', 'Token expired and no refresh_token available');
+      return null;
+    }
+    try {
+      log('Access token expiring soon, refreshing...');
+      const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      const { data, error } = await sb.auth.refreshSession({
+        refresh_token: session.refresh_token,
+      });
+      if (error || !data?.session) {
+        logError('getFreshSession refresh', error);
+        return null;
+      }
+      store.set('session', data.session);
+      log('Token refreshed successfully');
+      return data.session;
+    } catch (err) {
+      logError('getFreshSession refresh', err);
+      return null;
+    }
+  }
+
+  return session;
+}
 
 function getSupabase(accessToken) {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -37,52 +75,33 @@ function getSupabase(accessToken) {
   });
 }
 
-async function callSpotifyAPI(endpoint, accessToken) {
+// ─── Spotify API ──────────────────────────────────────────────────────────────
+
+async function callSpotifyAPI(endpoint, session) {
   try {
     const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     const { data, error } = await sb.functions.invoke('spotify-api', {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${session.access_token}` },
       body: { endpoint },
     });
-    if (error) {
-      if (error.message?.includes('401') || error.message?.includes('non-2xx')) {
-        const session = store.get('session');
-        if (session?.refresh_token) {
-          const { data: refreshData, error: refreshError } = await sb.auth.refreshSession({
-            refresh_token: session.refresh_token,
-          });
-          if (!refreshError && refreshData.session) {
-            store.set('session', refreshData.session);
-            const { data: retryData, error: retryError } = await sb.functions.invoke('spotify-api', {
-              headers: { Authorization: `Bearer ${refreshData.session.access_token}` },
-              body: { endpoint },
-            });
-            if (retryError) throw retryError;
-            return retryData;
-          }
-        }
-      }
-      throw error;
-    }
+    if (error) throw error;
     return data;
   } catch (err) {
-    logError('callSpotifyAPI', err);
+    logError(`callSpotifyAPI(${endpoint})`, err);
     return null;
   }
 }
 
-// ─── Validation helpers ───────────────────────────────────────────────────────
+// ─── Validation ───────────────────────────────────────────────────────────────
 
-// FIX: Validate track has all required fields before any write
 function isValidTrack(track) {
-  if (!track) { log('Validation failed: track is null'); return false; }
-  if (!track.id) { log('Validation failed: track.id missing'); return false; }
-  if (!track.name) { log('Validation failed: track.name missing'); return false; }
-  if (!track.artist) { log('Validation failed: track.artist missing'); return false; }
+  if (!track?.id || !track?.name || !track?.artist) {
+    log(`Validation failed for track: ${JSON.stringify(track)}`);
+    return false;
+  }
   return true;
 }
 
-// FIX: Validate stats are real numbers, not NaN/null/undefined/negative
 function sanitizeNumber(value, fallback = 0) {
   const n = Number(value);
   if (isNaN(n) || !isFinite(n) || n < 0) return fallback;
@@ -144,11 +163,16 @@ function addTrackToLocal() {
 
 // ─── Supabase sync ────────────────────────────────────────────────────────────
 
-async function syncToSupabase(track, session) {
-  // FIX: Validate everything before touching Supabase
-  if (!session?.user?.id) { log('syncToSupabase skipped: no user id'); return; }
-  if (!session?.access_token) { log('syncToSupabase skipped: no access token'); return; }
-  if (!isValidTrack(track)) { log('syncToSupabase skipped: invalid track'); return; }
+async function syncToSupabase(track, sessionArg) {
+  if (!isValidTrack(track)) return;
+
+  // ROOT CAUSE FIX: Always get a fresh session for Supabase writes,
+  // not the potentially-expired session that was passed in
+  const session = await getFreshSession();
+  if (!session?.user?.id || !session?.access_token) {
+    logError('syncToSupabase', 'No valid session available for sync');
+    return;
+  }
 
   checkDateRollover();
 
@@ -159,40 +183,31 @@ async function syncToSupabase(track, session) {
   const currentMinutes = Math.round(sanitizeNumber(localStats.minutesToday));
   const currentTracks = sanitizeNumber(localStats.tracksToday);
 
-  // FIX: Additional sanity check – never write 0 minutes if we've been tracking
-  if (currentMinutes < 0 || currentTracks < 0) {
-    logError('syncToSupabase', `Refusing to sync negative stats: ${currentMinutes}min, ${currentTracks} tracks`);
-    return;
-  }
-
   const minutesDelta = Math.max(0, currentMinutes - lastSyncedMinutesToday);
   const tracksDelta = Math.max(0, currentTracks - lastSyncedTracksToday);
 
-  log(`Syncing track "${track.name}" | today: ${currentMinutes}min / ${currentTracks} tracks | delta: +${minutesDelta}min / +${tracksDelta} tracks`);
+  log(`Syncing "${track.name}" | today: ${currentMinutes}min / ${currentTracks} tracks | delta: +${minutesDelta}min / +${tracksDelta} tracks`);
 
-  // ── Step 1: Log the play ──────────────────────────────────────────────────
+  // Step 1: Log play
   try {
     const { error } = await sb.from('background_tracked_plays').insert({
       user_id: session.user.id,
       track_id: track.id,
-      track_name: track.name || 'Unknown',
-      artist_name: track.artist || 'Unknown',
+      track_name: track.name,
+      artist_name: track.artist,
       album_name: track.album || '',
       album_image: track.albumArt || null,
       spotify_url: track.spotifyUrl || null,
       played_at: new Date().toISOString(),
     });
     if (error) logError('insert background_tracked_plays', error);
-    else log(`Logged play: "${track.name}"`);
+    else log(`Play logged: "${track.name}"`);
   } catch (err) {
     logError('insert background_tracked_plays', err);
-    // Non-fatal: continue with stats sync
   }
 
-  // ── Step 2: Upsert daily stats ────────────────────────────────────────────
+  // Step 2: Upsert daily stats
   try {
-    // FIX: Only upsert if we have real data (currentMinutes > 0 OR currentTracks > 0)
-    // Never upsert zeros if it would overwrite existing data
     if (currentMinutes > 0 || currentTracks > 0) {
       const { error } = await sb.from('daily_listening_stats').upsert({
         user_id: session.user.id,
@@ -201,19 +216,15 @@ async function syncToSupabase(track, session) {
         tracks_played: currentTracks,
       }, { onConflict: 'user_id,date' });
       if (error) logError('upsert daily_listening_stats', error);
-      else log(`Daily stats updated: ${currentMinutes}min, ${currentTracks} tracks`);
-    } else {
-      log('Skipping daily stats upsert: both values are 0');
+      else log(`Daily stats: ${currentMinutes}min, ${currentTracks} tracks`);
     }
   } catch (err) {
     logError('upsert daily_listening_stats', err);
-    // Non-fatal: continue
   }
 
-  // ── Step 3: Update total stats (delta only) ───────────────────────────────
+  // Step 3: Update total stats (delta only)
   try {
     if (minutesDelta > 0 || tracksDelta > 0) {
-      // FIX: Read existing values first with explicit error handling
       const { data: existing, error: fetchError } = await sb
         .from('listening_stats')
         .select('total_minutes, tracks_played')
@@ -222,20 +233,16 @@ async function syncToSupabase(track, session) {
 
       if (fetchError) {
         logError('fetch listening_stats', fetchError);
-        // STOP: don't write if we can't read – avoids overwriting with wrong data
-        return;
+        return; // Don't write if we can't read
       }
 
       const existingMinutes = sanitizeNumber(existing?.total_minutes);
       const existingTracks = sanitizeNumber(existing?.tracks_played);
-
       const newMinutes = existingMinutes + minutesDelta;
       const newTracks = existingTracks + tracksDelta;
 
-      // FIX: Final safety check – new values must be >= existing values
       if (newMinutes < existingMinutes || newTracks < existingTracks) {
-        logError('listening_stats safety check',
-          `Refusing to write lower values: ${existingMinutes}→${newMinutes}min, ${existingTracks}→${newTracks} tracks`);
+        logError('listening_stats safety', `Refusing lower values: ${existingMinutes}→${newMinutes}, ${existingTracks}→${newTracks}`);
         return;
       }
 
@@ -251,10 +258,8 @@ async function syncToSupabase(track, session) {
       } else {
         lastSyncedMinutesToday = currentMinutes;
         lastSyncedTracksToday = currentTracks;
-        log(`Total stats updated: ${existingMinutes}→${newMinutes}min, ${existingTracks}→${newTracks} tracks`);
+        log(`Total stats: ${existingMinutes}→${newMinutes}min, ${existingTracks}→${newTracks} tracks`);
       }
-    } else {
-      log('Skipping total stats update: delta is 0');
     }
   } catch (err) {
     logError('upsert listening_stats', err);
@@ -268,7 +273,7 @@ function commitRemainingProgress(track) {
   const remaining = sanitizeNumber((track.duration || 0) - lastCommittedProgress);
   if (remaining > 0 && remaining < 15000) {
     addMinutesToLocal(remaining);
-    log(`+${Math.round(remaining / 1000)}s (track end commit)`);
+    log(`+${Math.round(remaining / 1000)}s (end of track)`);
   }
 }
 
@@ -283,12 +288,18 @@ function commitProgressDelta(currentProgress) {
 
 // ─── Main poll ────────────────────────────────────────────────────────────────
 
-async function pollCurrentTrack(session, onTrackChange) {
+async function pollCurrentTrack(onTrackChange) {
   try {
     checkDateRollover();
 
-    const data = await callSpotifyAPI('currently-playing', session.access_token);
+    // ROOT CAUSE FIX: Always use a fresh session for every poll
+    const session = await getFreshSession();
+    if (!session) {
+      log('No valid session, skipping poll');
+      return;
+    }
 
+    const data = await callSpotifyAPI('currently-playing', session);
     const isNothingPlaying = !data || Object.keys(data).length === 0 || !data.item;
 
     if (isNothingPlaying) {
@@ -306,10 +317,8 @@ async function pollCurrentTrack(session, onTrackChange) {
     }
 
     const item = data.item;
-
-    // FIX: Validate API response before using
     if (!item?.id || !item?.name) {
-      log('Incomplete track data from API, skipping poll');
+      log('Incomplete track data, skipping');
       return;
     }
 
@@ -377,11 +386,13 @@ function startTracker(session, settings, onTrackChange) {
   const intervalMs = sanitizeNumber((settings.trackingInterval || 30) * 1000, 30000);
   log(`Starting with ${intervalMs / 1000}s interval`);
 
-  pollCurrentTrack(session, onTrackChange);
+  // Initial poll
+  pollCurrentTrack(onTrackChange);
 
+  // ROOT CAUSE FIX: Interval no longer passes session – each poll fetches
+  // a fresh session itself, so expired tokens are always refreshed automatically
   trackerInterval = setInterval(() => {
-    const currentSession = store.get('session');
-    if (currentSession) pollCurrentTrack(currentSession, onTrackChange);
+    pollCurrentTrack(onTrackChange);
   }, intervalMs);
 }
 

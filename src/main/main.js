@@ -99,8 +99,6 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-
-    // FIX: After update restart, send session to renderer so it doesn't show login screen
     const session = store.get('session');
     if (session) {
       mainWindow.webContents.once('did-finish-load', () => {
@@ -132,7 +130,10 @@ function createTray() {
 }
 
 function updateTrayMenu(currentTrack = null) {
-  const trackLabel = currentTrack ? `▶ ${currentTrack.name} – ${currentTrack.artist}` : '⏸ Nichts läuft gerade';
+  const trackLabel = currentTrack
+    ? `▶ ${currentTrack.name} – ${currentTrack.artist}`
+    : '⏸ Nichts läuft gerade';
+
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Mus-IQ', enabled: false },
     { type: 'separator' },
@@ -143,8 +144,12 @@ function updateTrayMenu(currentTrack = null) {
       label: 'Tracking pausieren', type: 'checkbox', checked: store.get('trackingPaused', false),
       click: (item) => {
         store.set('trackingPaused', item.checked);
-        if (item.checked) stopTracker();
-        else { const s = store.get('session'); if (s) startTracker(s, getSettings(), onTrackChange); }
+        if (item.checked) {
+          stopTracker();
+        } else {
+          const settings = getSettings();
+          startTracker(null, settings, onTrackChange);
+        }
       },
     },
     { type: 'separator' },
@@ -157,6 +162,7 @@ function updateTrayMenu(currentTrack = null) {
     { type: 'separator' },
     { label: 'Beenden', click: () => { isQuitting = true; app.quit(); } },
   ]);
+
   tray.setContextMenu(contextMenu);
 }
 
@@ -188,17 +194,21 @@ ipcMain.handle('set-settings', (_, newSettings) => {
   }
   if ('trackingInterval' in newSettings) {
     const session = store.get('session');
-    if (session) { stopTracker(); startTracker(session, updated, onTrackChange); }
+    if (session) { stopTracker(); startTracker(null, updated, onTrackChange); }
   }
   return updated;
 });
+
 ipcMain.handle('get-session', () => store.get('session', null));
 ipcMain.handle('set-session', (_, session) => {
   store.set('session', session);
   if (session) {
-    startTracker(session, getSettings(), onTrackChange);
+    startTracker(null, getSettings(), onTrackChange);
     if (getSettings().discordRPC) initDiscordRPC().catch(() => {});
-  } else { stopTracker(); destroyDiscordRPC(); }
+  } else {
+    stopTracker();
+    destroyDiscordRPC();
+  }
 });
 ipcMain.handle('logout', () => {
   store.delete('session');
@@ -210,8 +220,14 @@ ipcMain.handle('get-current-track', () => store.get('currentTrack', null));
 ipcMain.handle('get-stats', () => store.get('localStats', { tracksToday: 0, minutesToday: 0, sessionsTotal: 0 }));
 ipcMain.handle('open-external', (_, url) => shell.openExternal(url));
 ipcMain.handle('minimize-window', () => mainWindow?.minimize());
-ipcMain.handle('maximize-window', () => { if (mainWindow?.isMaximized()) mainWindow.unmaximize(); else mainWindow?.maximize(); });
-ipcMain.handle('close-window', () => { if (getSettings().minimizeToTray) mainWindow?.hide(); else { isQuitting = true; app.quit(); } });
+ipcMain.handle('maximize-window', () => {
+  if (mainWindow?.isMaximized()) mainWindow.unmaximize();
+  else mainWindow?.maximize();
+});
+ipcMain.handle('close-window', () => {
+  if (getSettings().minimizeToTray) mainWindow?.hide();
+  else { isQuitting = true; app.quit(); }
+});
 ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.handle('check-for-updates', async () => {
@@ -230,22 +246,22 @@ app.whenReady().then(async () => {
   createTray();
   setupAutoUpdater();
 
-  const session = store.get('session');
   const settings = getSettings();
 
-  // FIX: Always resume tracking on startup if session exists
-  // This covers both normal start and post-update restart
-  if (session && !store.get('trackingPaused', false)) {
-    console.log('[Main] Resuming tracker from stored session');
-    startTracker(session, settings, onTrackChange);
-    if (settings.discordRPC) initDiscordRPC().catch(() => {});
+  if (!store.get('trackingPaused', false)) {
+    console.log('[Main] Starting tracker on launch');
+    startTracker(null, settings, onTrackChange);
   }
 
+  if (settings.discordRPC) initDiscordRPC().catch(() => {});
   setupAutostart(settings.autostart);
 
   if (!isDev) setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000);
 });
 
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); else mainWindow?.show(); });
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  else mainWindow?.show();
+});
 app.on('before-quit', () => { isQuitting = true; stopTracker(); destroyDiscordRPC(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
