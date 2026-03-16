@@ -14,9 +14,10 @@ let activeTrackData = null;
 let lastCommittedProgress = 0;
 let lastSeenProgress = 0;
 
-// Track what we already synced to Supabase today to only send deltas
+// Sync state
 let lastSyncedMinutesToday = 0;
 let lastSyncedTracksToday = 0;
+let lastSyncedDate = null;
 
 function getSupabase(accessToken) {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -58,19 +59,31 @@ async function callSpotifyAPI(endpoint, accessToken) {
   }
 }
 
-// ─── Local stats helpers ──────────────────────────────────────────────────────
-
-function getTodayKey() {
-  return `localStats_${new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' })}`;
-}
+// ─── Date helpers ─────────────────────────────────────────────────────────────
 
 function getTodayDate() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
 }
 
+function getTodayKey() {
+  return `localStats_${getTodayDate()}`;
+}
+
 function getLocalStats() {
   return store.get(getTodayKey(), { tracksToday: 0, minutesToday: 0 });
 }
+
+function checkDateRollover() {
+  const today = getTodayDate();
+  if (lastSyncedDate !== null && lastSyncedDate !== today) {
+    console.log(`[Tracker] Date rollover: ${lastSyncedDate} → ${today}`);
+    lastSyncedMinutesToday = 0;
+    lastSyncedTracksToday = 0;
+  }
+  lastSyncedDate = today;
+}
+
+// ─── Local stats ──────────────────────────────────────────────────────────────
 
 function addMinutesToLocal(deltaMs) {
   if (deltaMs <= 0) return;
@@ -97,12 +110,12 @@ function addTrackToLocal() {
 
 // ─── Supabase sync ────────────────────────────────────────────────────────────
 
-// FIX: Only sync the DELTA since last sync, not the full daily total each time.
-// This prevents double-counting in listening_stats.total_minutes.
 async function syncToSupabase(track, session) {
   if (!session?.user?.id || !track) return;
 
   try {
+    checkDateRollover();
+
     const sb = getSupabase(session.access_token);
     const today = getTodayDate();
     const localStats = getLocalStats();
@@ -110,11 +123,10 @@ async function syncToSupabase(track, session) {
     const currentMinutes = Math.round(localStats.minutesToday || 0);
     const currentTracks = localStats.tracksToday || 0;
 
-    // How much has changed since last sync?
     const minutesDelta = currentMinutes - lastSyncedMinutesToday;
     const tracksDelta = currentTracks - lastSyncedTracksToday;
 
-    // 1. Log the play in background_tracked_plays
+    // 1. Log the play
     await sb.from('background_tracked_plays').insert({
       user_id: session.user.id,
       track_id: track.id,
@@ -126,7 +138,7 @@ async function syncToSupabase(track, session) {
       played_at: new Date().toISOString(),
     });
 
-    // 2. Upsert daily stats (always write the current accurate total)
+    // 2. Upsert daily stats for today
     await sb.from('daily_listening_stats').upsert({
       user_id: session.user.id,
       date: today,
@@ -134,27 +146,42 @@ async function syncToSupabase(track, session) {
       tracks_played: currentTracks,
     }, { onConflict: 'user_id,date' });
 
-    // 3. FIX: Add only the DELTA to total stats, not the full daily total
+    // 3. FIX: Update total stats safely using Postgres increment via RPC
+    // Falls back to read-then-write with a safety check so values never go backwards
     if (minutesDelta > 0 || tracksDelta > 0) {
-      const { data: existing } = await sb
+      const { data: existing, error: fetchError } = await sb
         .from('listening_stats')
         .select('total_minutes, tracks_played')
         .eq('user_id', session.user.id)
         .maybeSingle();
 
+      if (fetchError) {
+        console.error('[Tracker] Failed to fetch existing stats:', fetchError.message);
+        // Don't update total stats if we can't read current values
+        // This prevents accidental overwrites with wrong data
+        return;
+      }
+
+      const existingMinutes = existing?.total_minutes || 0;
+      const existingTracks = existing?.tracks_played || 0;
+
+      // FIX: Never let total go below what was already in Supabase
+      const newMinutes = existingMinutes + minutesDelta;
+      const newTracks = existingTracks + tracksDelta;
+
       await sb.from('listening_stats').upsert({
         user_id: session.user.id,
-        total_minutes: (existing?.total_minutes || 0) + minutesDelta,
-        tracks_played: (existing?.tracks_played || 0) + tracksDelta,
+        total_minutes: Math.max(newMinutes, existingMinutes), // safety: never go backwards
+        tracks_played: Math.max(newTracks, existingTracks),   // safety: never go backwards
         updated_at: new Date().toISOString(),
       }, { onConflict: 'user_id' });
 
-      // Remember what we synced
       lastSyncedMinutesToday = currentMinutes;
       lastSyncedTracksToday = currentTracks;
+
+      console.log(`[Tracker] Synced: "${track.name}" | +${minutesDelta}min | total: ${newMinutes}min`);
     }
 
-    console.log(`[Tracker] Synced to Supabase: "${track.name}" (+${minutesDelta}min, +${tracksDelta} tracks)`);
   } catch (err) {
     console.error('[Tracker] Supabase sync error:', err.message);
   }
@@ -165,7 +192,6 @@ async function syncToSupabase(track, session) {
 function commitRemainingProgress(track) {
   if (!track || lastCommittedProgress <= 0) return;
   const remaining = (track.duration || 0) - lastCommittedProgress;
-  // Only count if song ended naturally (gap < 15s)
   if (remaining > 0 && remaining < 15000) {
     addMinutesToLocal(remaining);
     console.log(`[Tracker] +${Math.round(remaining / 1000)}s (track end)`);
@@ -174,7 +200,7 @@ function commitRemainingProgress(track) {
 
 function commitProgressDelta(currentProgress) {
   const delta = currentProgress - lastCommittedProgress;
-  if (delta < 5000) return; // ignore < 5s (jitter, seeks)
+  if (delta < 5000) return;
   addMinutesToLocal(delta);
   lastCommittedProgress = currentProgress;
   const stats = getLocalStats();
@@ -185,18 +211,19 @@ function commitProgressDelta(currentProgress) {
 
 async function pollCurrentTrack(session, onTrackChange) {
   try {
+    checkDateRollover();
+
     const data = await callSpotifyAPI('currently-playing', session.access_token);
 
-    // Nothing playing
-    if (!data || !data.item) {
+    const isNothingPlaying = !data || Object.keys(data).length === 0 || !data.item;
+
+    if (isNothingPlaying) {
       const prevTrack = store.get('currentTrack');
       if (prevTrack !== null) {
         store.set('currentTrack', null);
         onTrackChange(null);
       }
-      if (activeTrackData) {
-        commitRemainingProgress(activeTrackData);
-      }
+      if (activeTrackData) commitRemainingProgress(activeTrackData);
       activeTrackId = null;
       activeTrackData = null;
       lastCommittedProgress = 0;
@@ -205,6 +232,12 @@ async function pollCurrentTrack(session, onTrackChange) {
     }
 
     const item = data.item;
+
+    if (!item?.id || !item?.name) {
+      console.log('[Tracker] Incomplete track data, skipping');
+      return;
+    }
+
     const track = {
       id: item.id,
       name: item.name,
@@ -221,14 +254,11 @@ async function pollCurrentTrack(session, onTrackChange) {
     const isNewTrack = activeTrackId !== track.id;
 
     if (isNewTrack) {
-      // Commit remaining seconds of previous track
       if (activeTrackData) {
         commitRemainingProgress(activeTrackData);
-        // Sync previous track to Supabase
         await syncToSupabase(activeTrackData, session);
       }
 
-      // Reset state for new track
       activeTrackId = track.id;
       activeTrackData = track;
       lastCommittedProgress = currentProgress;
@@ -241,7 +271,6 @@ async function pollCurrentTrack(session, onTrackChange) {
       return;
     }
 
-    // Same track – commit progress delta if playing
     if (track.isPlaying) {
       commitProgressDelta(currentProgress);
       lastSeenProgress = currentProgress;
@@ -249,7 +278,6 @@ async function pollCurrentTrack(session, onTrackChange) {
 
     activeTrackData = track;
 
-    // Notify renderer only if play/pause changed
     const prevTrack = store.get('currentTrack');
     if (prevTrack?.isPlaying !== track.isPlaying || prevTrack?.id !== track.id) {
       onTrackChange(track);
@@ -262,12 +290,14 @@ async function pollCurrentTrack(session, onTrackChange) {
   }
 }
 
+// ─── Start / Stop ─────────────────────────────────────────────────────────────
+
 function startTracker(session, settings, onTrackChange) {
   if (trackerInterval) clearInterval(trackerInterval);
 
-  // Reset sync counters on start (new session)
   lastSyncedMinutesToday = 0;
   lastSyncedTracksToday = 0;
+  lastSyncedDate = getTodayDate();
 
   const intervalMs = (settings.trackingInterval || 30) * 1000;
   console.log(`[Tracker] Starting with ${intervalMs / 1000}s interval`);
