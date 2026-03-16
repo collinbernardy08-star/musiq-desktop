@@ -37,8 +37,6 @@ function setupAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.allowDowngrade = false;
   autoUpdater.allowPrerelease = false;
-
-  // FIX: Skip code signature validation (app is not signed)
   autoUpdater.verifyUpdateCodeSignature = () => Promise.resolve(undefined);
 
   autoUpdater.on('checking-for-update', () => sendUpdateStatus({ status: 'checking' }));
@@ -99,10 +97,22 @@ function createWindow() {
   if (isDev) mainWindow.loadURL('http://localhost:5173');
   else mainWindow.loadFile(path.join(__dirname, '../../src/renderer/dist/index.html'));
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+
+    // FIX: After update restart, send session to renderer so it doesn't show login screen
+    const session = store.get('session');
+    if (session) {
+      mainWindow.webContents.once('did-finish-load', () => {
+        mainWindow.webContents.send('session-restored', session);
+      });
+    }
+  });
+
   mainWindow.on('resize', () => {
     if (!mainWindow.isMaximized()) store.set('windowBounds', mainWindow.getBounds());
   });
+
   mainWindow.on('close', (e) => {
     if (!isQuitting && getSettings().minimizeToTray) { e.preventDefault(); mainWindow.hide(); }
   });
@@ -190,7 +200,12 @@ ipcMain.handle('set-session', (_, session) => {
     if (getSettings().discordRPC) initDiscordRPC().catch(() => {});
   } else { stopTracker(); destroyDiscordRPC(); }
 });
-ipcMain.handle('logout', () => { store.delete('session'); stopTracker(); destroyDiscordRPC(); updateTrayMenu(null); });
+ipcMain.handle('logout', () => {
+  store.delete('session');
+  stopTracker();
+  destroyDiscordRPC();
+  updateTrayMenu(null);
+});
 ipcMain.handle('get-current-track', () => store.get('currentTrack', null));
 ipcMain.handle('get-stats', () => store.get('localStats', { tracksToday: 0, minutesToday: 0, sessionsTotal: 0 }));
 ipcMain.handle('open-external', (_, url) => shell.openExternal(url));
@@ -217,8 +232,15 @@ app.whenReady().then(async () => {
 
   const session = store.get('session');
   const settings = getSettings();
-  if (session && !store.get('trackingPaused', false)) startTracker(session, settings, onTrackChange);
-  if (settings.discordRPC) initDiscordRPC().catch(() => {});
+
+  // FIX: Always resume tracking on startup if session exists
+  // This covers both normal start and post-update restart
+  if (session && !store.get('trackingPaused', false)) {
+    console.log('[Main] Resuming tracker from stored session');
+    startTracker(session, settings, onTrackChange);
+    if (settings.discordRPC) initDiscordRPC().catch(() => {});
+  }
+
   setupAutostart(settings.autostart);
 
   if (!isDev) setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000);

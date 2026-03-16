@@ -41,4 +41,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-status', (_, data) => callback(data));
     return () => ipcRenderer.removeAllListeners('update-status');
   },
+  // FIX: Session restore after update restart
+  onSessionRestored: (callback) => {
+    ipcRenderer.on('session-restored', (_, session) => callback(session));
+    return () => ipcRenderer.removeAllListeners('session-restored');
+  },
 });

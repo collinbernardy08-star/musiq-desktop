@@ -12,7 +12,6 @@ export default function App() {
   const [page, setPage] = useState('dashboard');
 
   useEffect(() => {
-    // Check for existing session
     const init = async () => {
       try {
         const s = await window.electronAPI.getSession();
@@ -24,6 +23,16 @@ export default function App() {
       }
     };
     init();
+
+    // FIX: Listen for session-restored event after update restart
+    // so the user doesn't have to log in again
+    const cleanup = window.electronAPI.onSessionRestored((restoredSession) => {
+      console.log('[App] Session restored after update');
+      setSession(restoredSession);
+      setLoading(false);
+    });
+
+    return cleanup;
   }, []);
 
   const handleLogin = async (newSession) => {
