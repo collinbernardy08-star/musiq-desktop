@@ -19,6 +19,18 @@ let lastSyncedMinutesToday = 0;
 let lastSyncedTracksToday = 0;
 let lastSyncedDate = null;
 
+// ─── Logging ──────────────────────────────────────────────────────────────────
+
+function log(msg) {
+  console.log(`[Tracker] ${new Date().toISOString()} ${msg}`);
+}
+
+function logError(context, err) {
+  console.error(`[Tracker][ERROR][${context}] ${err?.message || err}`);
+}
+
+// ─── Supabase client ──────────────────────────────────────────────────────────
+
 function getSupabase(accessToken) {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
@@ -54,9 +66,27 @@ async function callSpotifyAPI(endpoint, accessToken) {
     }
     return data;
   } catch (err) {
-    console.error(`[Tracker] Spotify API error (${endpoint}):`, err.message);
+    logError('callSpotifyAPI', err);
     return null;
   }
+}
+
+// ─── Validation helpers ───────────────────────────────────────────────────────
+
+// FIX: Validate track has all required fields before any write
+function isValidTrack(track) {
+  if (!track) { log('Validation failed: track is null'); return false; }
+  if (!track.id) { log('Validation failed: track.id missing'); return false; }
+  if (!track.name) { log('Validation failed: track.name missing'); return false; }
+  if (!track.artist) { log('Validation failed: track.artist missing'); return false; }
+  return true;
+}
+
+// FIX: Validate stats are real numbers, not NaN/null/undefined/negative
+function sanitizeNumber(value, fallback = 0) {
+  const n = Number(value);
+  if (isNaN(n) || !isFinite(n) || n < 0) return fallback;
+  return n;
 }
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
@@ -70,13 +100,17 @@ function getTodayKey() {
 }
 
 function getLocalStats() {
-  return store.get(getTodayKey(), { tracksToday: 0, minutesToday: 0 });
+  const raw = store.get(getTodayKey(), { tracksToday: 0, minutesToday: 0 });
+  return {
+    tracksToday: sanitizeNumber(raw.tracksToday),
+    minutesToday: sanitizeNumber(raw.minutesToday),
+  };
 }
 
 function checkDateRollover() {
   const today = getTodayDate();
   if (lastSyncedDate !== null && lastSyncedDate !== today) {
-    console.log(`[Tracker] Date rollover: ${lastSyncedDate} → ${today}`);
+    log(`Date rollover: ${lastSyncedDate} → ${today} – resetting sync counters`);
     lastSyncedMinutesToday = 0;
     lastSyncedTracksToday = 0;
   }
@@ -86,69 +120,100 @@ function checkDateRollover() {
 // ─── Local stats ──────────────────────────────────────────────────────────────
 
 function addMinutesToLocal(deltaMs) {
-  if (deltaMs <= 0) return;
+  if (!deltaMs || deltaMs <= 0) return;
   const statsKey = getTodayKey();
   const stats = store.get(statsKey, { tracksToday: 0, minutesToday: 0 });
-  stats.minutesToday = (stats.minutesToday || 0) + deltaMs / 60000;
+  stats.minutesToday = sanitizeNumber(stats.minutesToday) + deltaMs / 60000;
   store.set(statsKey, stats);
   store.set('localStats', {
-    tracksToday: stats.tracksToday,
-    minutesToday: Math.round(stats.minutesToday),
+    tracksToday: sanitizeNumber(stats.tracksToday),
+    minutesToday: Math.round(sanitizeNumber(stats.minutesToday)),
   });
 }
 
 function addTrackToLocal() {
   const statsKey = getTodayKey();
   const stats = store.get(statsKey, { tracksToday: 0, minutesToday: 0 });
-  stats.tracksToday = (stats.tracksToday || 0) + 1;
+  stats.tracksToday = sanitizeNumber(stats.tracksToday) + 1;
   store.set(statsKey, stats);
   store.set('localStats', {
-    tracksToday: stats.tracksToday,
-    minutesToday: Math.round(stats.minutesToday || 0),
+    tracksToday: sanitizeNumber(stats.tracksToday),
+    minutesToday: Math.round(sanitizeNumber(stats.minutesToday)),
   });
 }
 
 // ─── Supabase sync ────────────────────────────────────────────────────────────
 
 async function syncToSupabase(track, session) {
-  if (!session?.user?.id || !track) return;
+  // FIX: Validate everything before touching Supabase
+  if (!session?.user?.id) { log('syncToSupabase skipped: no user id'); return; }
+  if (!session?.access_token) { log('syncToSupabase skipped: no access token'); return; }
+  if (!isValidTrack(track)) { log('syncToSupabase skipped: invalid track'); return; }
 
+  checkDateRollover();
+
+  const sb = getSupabase(session.access_token);
+  const today = getTodayDate();
+  const localStats = getLocalStats();
+
+  const currentMinutes = Math.round(sanitizeNumber(localStats.minutesToday));
+  const currentTracks = sanitizeNumber(localStats.tracksToday);
+
+  // FIX: Additional sanity check – never write 0 minutes if we've been tracking
+  if (currentMinutes < 0 || currentTracks < 0) {
+    logError('syncToSupabase', `Refusing to sync negative stats: ${currentMinutes}min, ${currentTracks} tracks`);
+    return;
+  }
+
+  const minutesDelta = Math.max(0, currentMinutes - lastSyncedMinutesToday);
+  const tracksDelta = Math.max(0, currentTracks - lastSyncedTracksToday);
+
+  log(`Syncing track "${track.name}" | today: ${currentMinutes}min / ${currentTracks} tracks | delta: +${minutesDelta}min / +${tracksDelta} tracks`);
+
+  // ── Step 1: Log the play ──────────────────────────────────────────────────
   try {
-    checkDateRollover();
-
-    const sb = getSupabase(session.access_token);
-    const today = getTodayDate();
-    const localStats = getLocalStats();
-
-    const currentMinutes = Math.round(localStats.minutesToday || 0);
-    const currentTracks = localStats.tracksToday || 0;
-
-    const minutesDelta = currentMinutes - lastSyncedMinutesToday;
-    const tracksDelta = currentTracks - lastSyncedTracksToday;
-
-    // 1. Log the play
-    await sb.from('background_tracked_plays').insert({
+    const { error } = await sb.from('background_tracked_plays').insert({
       user_id: session.user.id,
       track_id: track.id,
-      track_name: track.name,
-      artist_name: track.artist,
-      album_name: track.album,
-      album_image: track.albumArt,
-      spotify_url: track.spotifyUrl,
+      track_name: track.name || 'Unknown',
+      artist_name: track.artist || 'Unknown',
+      album_name: track.album || '',
+      album_image: track.albumArt || null,
+      spotify_url: track.spotifyUrl || null,
       played_at: new Date().toISOString(),
     });
+    if (error) logError('insert background_tracked_plays', error);
+    else log(`Logged play: "${track.name}"`);
+  } catch (err) {
+    logError('insert background_tracked_plays', err);
+    // Non-fatal: continue with stats sync
+  }
 
-    // 2. Upsert daily stats for today
-    await sb.from('daily_listening_stats').upsert({
-      user_id: session.user.id,
-      date: today,
-      minutes_listened: currentMinutes,
-      tracks_played: currentTracks,
-    }, { onConflict: 'user_id,date' });
+  // ── Step 2: Upsert daily stats ────────────────────────────────────────────
+  try {
+    // FIX: Only upsert if we have real data (currentMinutes > 0 OR currentTracks > 0)
+    // Never upsert zeros if it would overwrite existing data
+    if (currentMinutes > 0 || currentTracks > 0) {
+      const { error } = await sb.from('daily_listening_stats').upsert({
+        user_id: session.user.id,
+        date: today,
+        minutes_listened: currentMinutes,
+        tracks_played: currentTracks,
+      }, { onConflict: 'user_id,date' });
+      if (error) logError('upsert daily_listening_stats', error);
+      else log(`Daily stats updated: ${currentMinutes}min, ${currentTracks} tracks`);
+    } else {
+      log('Skipping daily stats upsert: both values are 0');
+    }
+  } catch (err) {
+    logError('upsert daily_listening_stats', err);
+    // Non-fatal: continue
+  }
 
-    // 3. FIX: Update total stats safely using Postgres increment via RPC
-    // Falls back to read-then-write with a safety check so values never go backwards
+  // ── Step 3: Update total stats (delta only) ───────────────────────────────
+  try {
     if (minutesDelta > 0 || tracksDelta > 0) {
+      // FIX: Read existing values first with explicit error handling
       const { data: existing, error: fetchError } = await sb
         .from('listening_stats')
         .select('total_minutes, tracks_played')
@@ -156,34 +221,43 @@ async function syncToSupabase(track, session) {
         .maybeSingle();
 
       if (fetchError) {
-        console.error('[Tracker] Failed to fetch existing stats:', fetchError.message);
-        // Don't update total stats if we can't read current values
-        // This prevents accidental overwrites with wrong data
+        logError('fetch listening_stats', fetchError);
+        // STOP: don't write if we can't read – avoids overwriting with wrong data
         return;
       }
 
-      const existingMinutes = existing?.total_minutes || 0;
-      const existingTracks = existing?.tracks_played || 0;
+      const existingMinutes = sanitizeNumber(existing?.total_minutes);
+      const existingTracks = sanitizeNumber(existing?.tracks_played);
 
-      // FIX: Never let total go below what was already in Supabase
       const newMinutes = existingMinutes + minutesDelta;
       const newTracks = existingTracks + tracksDelta;
 
-      await sb.from('listening_stats').upsert({
+      // FIX: Final safety check – new values must be >= existing values
+      if (newMinutes < existingMinutes || newTracks < existingTracks) {
+        logError('listening_stats safety check',
+          `Refusing to write lower values: ${existingMinutes}→${newMinutes}min, ${existingTracks}→${newTracks} tracks`);
+        return;
+      }
+
+      const { error: upsertError } = await sb.from('listening_stats').upsert({
         user_id: session.user.id,
-        total_minutes: Math.max(newMinutes, existingMinutes), // safety: never go backwards
-        tracks_played: Math.max(newTracks, existingTracks),   // safety: never go backwards
+        total_minutes: newMinutes,
+        tracks_played: newTracks,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'user_id' });
 
-      lastSyncedMinutesToday = currentMinutes;
-      lastSyncedTracksToday = currentTracks;
-
-      console.log(`[Tracker] Synced: "${track.name}" | +${minutesDelta}min | total: ${newMinutes}min`);
+      if (upsertError) {
+        logError('upsert listening_stats', upsertError);
+      } else {
+        lastSyncedMinutesToday = currentMinutes;
+        lastSyncedTracksToday = currentTracks;
+        log(`Total stats updated: ${existingMinutes}→${newMinutes}min, ${existingTracks}→${newTracks} tracks`);
+      }
+    } else {
+      log('Skipping total stats update: delta is 0');
     }
-
   } catch (err) {
-    console.error('[Tracker] Supabase sync error:', err.message);
+    logError('upsert listening_stats', err);
   }
 }
 
@@ -191,20 +265,20 @@ async function syncToSupabase(track, session) {
 
 function commitRemainingProgress(track) {
   if (!track || lastCommittedProgress <= 0) return;
-  const remaining = (track.duration || 0) - lastCommittedProgress;
+  const remaining = sanitizeNumber((track.duration || 0) - lastCommittedProgress);
   if (remaining > 0 && remaining < 15000) {
     addMinutesToLocal(remaining);
-    console.log(`[Tracker] +${Math.round(remaining / 1000)}s (track end)`);
+    log(`+${Math.round(remaining / 1000)}s (track end commit)`);
   }
 }
 
 function commitProgressDelta(currentProgress) {
-  const delta = currentProgress - lastCommittedProgress;
+  const delta = sanitizeNumber(currentProgress - lastCommittedProgress);
   if (delta < 5000) return;
   addMinutesToLocal(delta);
   lastCommittedProgress = currentProgress;
   const stats = getLocalStats();
-  console.log(`[Tracker] +${Math.round(delta / 1000)}s → today: ${Math.round(stats.minutesToday || 0)} min`);
+  log(`+${Math.round(delta / 1000)}s → today: ${Math.round(stats.minutesToday)} min`);
 }
 
 // ─── Main poll ────────────────────────────────────────────────────────────────
@@ -233,24 +307,25 @@ async function pollCurrentTrack(session, onTrackChange) {
 
     const item = data.item;
 
+    // FIX: Validate API response before using
     if (!item?.id || !item?.name) {
-      console.log('[Tracker] Incomplete track data, skipping');
+      log('Incomplete track data from API, skipping poll');
       return;
     }
 
     const track = {
       id: item.id,
       name: item.name,
-      artist: item.artists?.map((a) => a.name).join(', ') || '',
+      artist: item.artists?.map((a) => a.name).join(', ') || 'Unknown',
       album: item.album?.name || '',
       albumArt: item.album?.images?.[0]?.url || null,
-      duration: item.duration_ms,
-      progress: data.progress_ms || 0,
-      isPlaying: data.is_playing,
+      duration: sanitizeNumber(item.duration_ms),
+      progress: sanitizeNumber(data.progress_ms),
+      isPlaying: !!data.is_playing,
       spotifyUrl: item.external_urls?.spotify || null,
     };
 
-    const currentProgress = data.progress_ms || 0;
+    const currentProgress = sanitizeNumber(data.progress_ms);
     const isNewTrack = activeTrackId !== track.id;
 
     if (isNewTrack) {
@@ -267,7 +342,7 @@ async function pollCurrentTrack(session, onTrackChange) {
       addTrackToLocal();
       store.set('currentTrack', track);
       onTrackChange(track);
-      console.log(`[Tracker] New track: "${track.name}"`);
+      log(`New track: "${track.name}" by ${track.artist}`);
       return;
     }
 
@@ -286,7 +361,7 @@ async function pollCurrentTrack(session, onTrackChange) {
     store.set('currentTrack', track);
 
   } catch (err) {
-    console.error('[Tracker] Poll error:', err.message);
+    logError('pollCurrentTrack', err);
   }
 }
 
@@ -299,8 +374,8 @@ function startTracker(session, settings, onTrackChange) {
   lastSyncedTracksToday = 0;
   lastSyncedDate = getTodayDate();
 
-  const intervalMs = (settings.trackingInterval || 30) * 1000;
-  console.log(`[Tracker] Starting with ${intervalMs / 1000}s interval`);
+  const intervalMs = sanitizeNumber((settings.trackingInterval || 30) * 1000, 30000);
+  log(`Starting with ${intervalMs / 1000}s interval`);
 
   pollCurrentTrack(session, onTrackChange);
 
@@ -314,7 +389,7 @@ function stopTracker() {
   if (trackerInterval) {
     clearInterval(trackerInterval);
     trackerInterval = null;
-    console.log('[Tracker] Stopped');
+    log('Stopped');
   }
 }
 
