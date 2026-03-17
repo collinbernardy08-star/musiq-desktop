@@ -1,6 +1,6 @@
 {
   "name": "MusIQ-Desktop-App",
-  "version": "1.1.4",
+  "version": "1.0.0",
   "description": "Mus-IQ Desktop App",
   "main": "src/main/main.js",
   "author": "Mus-IQ",
@@ -52,25 +52,18 @@
       "package.json"
     ],
     "win": {
-      "target": [
-        "nsis"
-      ],
+      "target": ["nsis"],
       "icon": "assets/icon.ico",
       "publisherName": "Mus-IQ",
       "legalTrademarks": "Mus-IQ"
     },
     "mac": {
-      "target": [
-        "dmg"
-      ],
+      "target": ["dmg"],
       "icon": "assets/icon.icns",
       "category": "public.app-category.music"
     },
     "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
+      "target": ["AppImage", "deb"],
       "icon": "assets/icon.png",
       "category": "Audio"
     },
@@ -86,12 +79,10 @@
       "shortcutName": "Mus-IQ Desktop",
       "menuCategory": "Mus-IQ",
       "deleteAppDataOnUninstall": false,
-      "displayLanguageSelector": false,
-      "language": "1031",
       "installerSidebar": "build/installer-sidebar.bmp",
       "uninstallerSidebar": "build/installer-sidebar.bmp",
       "installerHeader": "build/installer-header.bmp",
-      "include": "installer/musiq.nsh"
+      "script": "installer/musiq-installer.nsi"
     }
   }
 }

@@ -4,6 +4,7 @@ const Store = require('electron-store');
 const { setupAutostart } = require('./autostart');
 const { startTracker, stopTracker } = require('./tracker');
 const { initDiscordRPC, updateDiscordRPC, destroyDiscordRPC } = require('./discord-rpc');
+const { startThemeSync, stopThemeSync } = require('./theme-sync');
 const { autoUpdater } = require('electron-updater');
 
 const store = new Store();
@@ -17,6 +18,7 @@ const DEFAULT_SETTINGS = {
   autostart: false,
   minimizeToTray: true,
   trackingInterval: 30,
+  realtimeTracking: true,
   discordRPC: true,
   discordShowAlbum: true,
   discordShowProgress: true,
@@ -29,18 +31,25 @@ function getSettings() {
   return { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
 }
 
-// ─── Session expired handler ──────────────────────────────────────────────────
-// Called by tracker when refresh token is also expired (full logout needed)
+// ─── Session expired ──────────────────────────────────────────────────────────
 function onSessionExpired() {
-  console.log('[Main] Session fully expired – clearing and sending logout to renderer');
+  console.log('[Main] Session expired');
   store.delete('session');
   store.delete('currentTrack');
   stopTracker();
+  stopThemeSync();
   destroyDiscordRPC();
   updateTrayMenu(null);
-  // Tell renderer to show login screen
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('session-expired');
+  }
+}
+
+// ─── Theme change ─────────────────────────────────────────────────────────────
+function onThemeChange(theme) {
+  console.log(`[Main] Theme changed: ${theme.themeId}`);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('theme-changed', theme);
   }
 }
 
@@ -91,8 +100,7 @@ function createWindow() {
   const { width, height } = store.get('windowBounds', { width: 900, height: 650 });
 
   mainWindow = new BrowserWindow({
-    width,
-    height,
+    width, height,
     minWidth: 750,
     minHeight: 550,
     frame: false,
@@ -114,7 +122,6 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    // Restore session in renderer after update restart
     const session = store.get('session');
     if (session) {
       mainWindow.webContents.once('did-finish-load', () => {
@@ -126,7 +133,6 @@ function createWindow() {
   mainWindow.on('resize', () => {
     if (!mainWindow.isMaximized()) store.set('windowBounds', mainWindow.getBounds());
   });
-
   mainWindow.on('close', (e) => {
     if (!isQuitting && getSettings().minimizeToTray) { e.preventDefault(); mainWindow.hide(); }
   });
@@ -174,11 +180,10 @@ function updateTrayMenu(currentTrack = null) {
     { type: 'separator' },
     { label: 'Beenden', click: () => { isQuitting = true; app.quit(); } },
   ]);
-
   tray.setContextMenu(contextMenu);
 }
 
-// ─── Track Change Handler ─────────────────────────────────────────────────────
+// ─── Track Change ─────────────────────────────────────────────────────────────
 function onTrackChange(track) {
   updateTrayMenu(track);
   const settings = getSettings();
@@ -204,7 +209,7 @@ ipcMain.handle('set-settings', (_, newSettings) => {
     if (newSettings.discordRPC) initDiscordRPC().catch(() => {});
     else destroyDiscordRPC();
   }
-  if ('trackingInterval' in newSettings) {
+  if ('trackingInterval' in newSettings || 'realtimeTracking' in newSettings) {
     stopTracker();
     startTracker(updated, onTrackChange, onSessionExpired);
   }
@@ -212,13 +217,16 @@ ipcMain.handle('set-settings', (_, newSettings) => {
 });
 
 ipcMain.handle('get-session', () => store.get('session', null));
-ipcMain.handle('set-session', (_, session) => {
+ipcMain.handle('set-session', async (_, session) => {
   store.set('session', session);
   if (session) {
-    startTracker(getSettings(), onTrackChange, onSessionExpired);
-    if (getSettings().discordRPC) initDiscordRPC().catch(() => {});
+    const settings = getSettings();
+    startTracker(settings, onTrackChange, onSessionExpired);
+    startThemeSync(session, onThemeChange);
+    if (settings.discordRPC) initDiscordRPC().catch(() => {});
   } else {
     stopTracker();
+    stopThemeSync();
     destroyDiscordRPC();
   }
 });
@@ -226,6 +234,7 @@ ipcMain.handle('logout', () => {
   store.delete('session');
   store.delete('currentTrack');
   stopTracker();
+  stopThemeSync();
   destroyDiscordRPC();
   updateTrayMenu(null);
 });
@@ -263,8 +272,8 @@ app.whenReady().then(async () => {
   const session = store.get('session');
 
   if (session && !store.get('trackingPaused', false)) {
-    console.log('[Main] Starting tracker on launch');
     startTracker(settings, onTrackChange, onSessionExpired);
+    startThemeSync(session, onThemeChange);
     if (settings.discordRPC) initDiscordRPC().catch(() => {});
   }
 
@@ -277,5 +286,5 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
   else mainWindow?.show();
 });
-app.on('before-quit', () => { isQuitting = true; stopTracker(); destroyDiscordRPC(); });
+app.on('before-quit', () => { isQuitting = true; stopTracker(); stopThemeSync(); destroyDiscordRPC(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

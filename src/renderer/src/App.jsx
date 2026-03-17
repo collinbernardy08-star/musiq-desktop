@@ -6,14 +6,23 @@ import DashboardPage from './pages/DashboardPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
 import StatsPage from './pages/StatsPage.jsx';
 
+// Apply theme CSS variables to :root
+function applyTheme(vars) {
+  if (!vars || typeof vars !== 'object') return;
+  const root = document.documentElement;
+  Object.entries(vars).forEach(([key, value]) => {
+    root.style.setProperty(key, value);
+  });
+}
+
 export default function App() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState('dashboard');
   const [sessionExpiredMsg, setSessionExpiredMsg] = useState(false);
+  const [currentTheme, setCurrentTheme] = useState('dark');
 
   useEffect(() => {
-    // Load session on startup
     const init = async () => {
       try {
         const s = await window.electronAPI.getSession();
@@ -26,24 +35,30 @@ export default function App() {
     };
     init();
 
-    // After update restart – session already exists, no need to log in again
+    // Session restore after update restart
     const cleanupRestored = window.electronAPI.onSessionRestored((restoredSession) => {
-      console.log('[App] Session restored after update');
       setSession(restoredSession);
       setLoading(false);
     });
 
-    // When refresh token expired – force back to login screen with message
+    // Session expired
     const cleanupExpired = window.electronAPI.onSessionExpired(() => {
-      console.log('[App] Session expired – showing login');
       setSession(null);
       setPage('dashboard');
       setSessionExpiredMsg(true);
     });
 
+    // Theme sync from website – applied instantly when user changes theme on mus-iq.com
+    const cleanupTheme = window.electronAPI.onThemeChanged((theme) => {
+      console.log('[App] Theme synced from website:', theme.themeId);
+      applyTheme(theme.vars);
+      setCurrentTheme(theme.themeId);
+    });
+
     return () => {
       cleanupRestored?.();
       cleanupExpired?.();
+      cleanupTheme?.();
     };
   }, []);
 
@@ -97,7 +112,7 @@ export default function App() {
         <main style={{ flex: 1, overflow: 'hidden' }}>
           {page === 'dashboard' && <DashboardPage session={session} />}
           {page === 'stats' && <StatsPage session={session} />}
-          {page === 'settings' && <SettingsPage session={session} onLogout={handleLogout} />}
+          {page === 'settings' && <SettingsPage session={session} onLogout={handleLogout} currentTheme={currentTheme} />}
         </main>
       </div>
     </div>

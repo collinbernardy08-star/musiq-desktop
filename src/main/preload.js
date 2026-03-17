@@ -28,7 +28,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   downloadUpdate: () => ipcRenderer.invoke('download-update'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
 
-  // Events from main process
+  // Events
   onTrackChanged: (callback) => {
     ipcRenderer.on('track-changed', (_, track) => callback(track));
     return () => ipcRenderer.removeAllListeners('track-changed');
@@ -45,9 +45,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('session-restored', (_, session) => callback(session));
     return () => ipcRenderer.removeAllListeners('session-restored');
   },
-  // Fired when refresh token is also expired – renderer should show login screen
   onSessionExpired: (callback) => {
     ipcRenderer.on('session-expired', () => callback());
     return () => ipcRenderer.removeAllListeners('session-expired');
+  },
+  // Theme sync from website
+  onThemeChanged: (callback) => {
+    ipcRenderer.on('theme-changed', (_, theme) => callback(theme));
+    return () => ipcRenderer.removeAllListeners('theme-changed');
   },
 });
