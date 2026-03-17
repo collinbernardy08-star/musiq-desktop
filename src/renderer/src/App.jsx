@@ -10,8 +10,10 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState('dashboard');
+  const [sessionExpiredMsg, setSessionExpiredMsg] = useState(false);
 
   useEffect(() => {
+    // Load session on startup
     const init = async () => {
       try {
         const s = await window.electronAPI.getSession();
@@ -24,20 +26,31 @@ export default function App() {
     };
     init();
 
-    // FIX: Listen for session-restored event after update restart
-    // so the user doesn't have to log in again
-    const cleanup = window.electronAPI.onSessionRestored((restoredSession) => {
+    // After update restart – session already exists, no need to log in again
+    const cleanupRestored = window.electronAPI.onSessionRestored((restoredSession) => {
       console.log('[App] Session restored after update');
       setSession(restoredSession);
       setLoading(false);
     });
 
-    return cleanup;
+    // When refresh token expired – force back to login screen with message
+    const cleanupExpired = window.electronAPI.onSessionExpired(() => {
+      console.log('[App] Session expired – showing login');
+      setSession(null);
+      setPage('dashboard');
+      setSessionExpiredMsg(true);
+    });
+
+    return () => {
+      cleanupRestored?.();
+      cleanupExpired?.();
+    };
   }, []);
 
   const handleLogin = async (newSession) => {
     await window.electronAPI.setSession(newSession);
     setSession(newSession);
+    setSessionExpiredMsg(false);
   };
 
   const handleLogout = async () => {
@@ -58,6 +71,19 @@ export default function App() {
     return (
       <>
         <TitleBar showControls />
+        {sessionExpiredMsg && (
+          <div style={{
+            background: 'rgba(251,191,36,0.1)',
+            border: '1px solid rgba(251,191,36,0.3)',
+            borderRadius: 8,
+            padding: '10px 16px',
+            margin: '12px 24px 0',
+            fontSize: 13,
+            color: '#fbbf24',
+          }}>
+            ⚠ Deine Sitzung ist abgelaufen. Bitte melde dich erneut an.
+          </div>
+        )}
         <LoginPage onLogin={handleLogin} />
       </>
     );

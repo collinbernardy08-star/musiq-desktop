@@ -41,9 +41,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-status', (_, data) => callback(data));
     return () => ipcRenderer.removeAllListeners('update-status');
   },
-  // FIX: Session restore after update restart
   onSessionRestored: (callback) => {
     ipcRenderer.on('session-restored', (_, session) => callback(session));
     return () => ipcRenderer.removeAllListeners('session-restored');
+  },
+  // Fired when refresh token is also expired – renderer should show login screen
+  onSessionExpired: (callback) => {
+    ipcRenderer.on('session-expired', () => callback());
+    return () => ipcRenderer.removeAllListeners('session-expired');
   },
 });

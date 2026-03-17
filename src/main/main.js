@@ -29,6 +29,21 @@ function getSettings() {
   return { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
 }
 
+// ─── Session expired handler ──────────────────────────────────────────────────
+// Called by tracker when refresh token is also expired (full logout needed)
+function onSessionExpired() {
+  console.log('[Main] Session fully expired – clearing and sending logout to renderer');
+  store.delete('session');
+  store.delete('currentTrack');
+  stopTracker();
+  destroyDiscordRPC();
+  updateTrayMenu(null);
+  // Tell renderer to show login screen
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('session-expired');
+  }
+}
+
 // ─── Auto Updater ─────────────────────────────────────────────────────────────
 function setupAutoUpdater() {
   if (isDev) return;
@@ -99,6 +114,7 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+    // Restore session in renderer after update restart
     const session = store.get('session');
     if (session) {
       mainWindow.webContents.once('did-finish-load', () => {
@@ -144,12 +160,8 @@ function updateTrayMenu(currentTrack = null) {
       label: 'Tracking pausieren', type: 'checkbox', checked: store.get('trackingPaused', false),
       click: (item) => {
         store.set('trackingPaused', item.checked);
-        if (item.checked) {
-          stopTracker();
-        } else {
-          const settings = getSettings();
-          startTracker(null, settings, onTrackChange);
-        }
+        if (item.checked) stopTracker();
+        else startTracker(getSettings(), onTrackChange, onSessionExpired);
       },
     },
     { type: 'separator' },
@@ -193,8 +205,8 @@ ipcMain.handle('set-settings', (_, newSettings) => {
     else destroyDiscordRPC();
   }
   if ('trackingInterval' in newSettings) {
-    const session = store.get('session');
-    if (session) { stopTracker(); startTracker(null, updated, onTrackChange); }
+    stopTracker();
+    startTracker(updated, onTrackChange, onSessionExpired);
   }
   return updated;
 });
@@ -203,7 +215,7 @@ ipcMain.handle('get-session', () => store.get('session', null));
 ipcMain.handle('set-session', (_, session) => {
   store.set('session', session);
   if (session) {
-    startTracker(null, getSettings(), onTrackChange);
+    startTracker(getSettings(), onTrackChange, onSessionExpired);
     if (getSettings().discordRPC) initDiscordRPC().catch(() => {});
   } else {
     stopTracker();
@@ -212,6 +224,7 @@ ipcMain.handle('set-session', (_, session) => {
 });
 ipcMain.handle('logout', () => {
   store.delete('session');
+  store.delete('currentTrack');
   stopTracker();
   destroyDiscordRPC();
   updateTrayMenu(null);
@@ -247,13 +260,14 @@ app.whenReady().then(async () => {
   setupAutoUpdater();
 
   const settings = getSettings();
+  const session = store.get('session');
 
-  if (!store.get('trackingPaused', false)) {
+  if (session && !store.get('trackingPaused', false)) {
     console.log('[Main] Starting tracker on launch');
-    startTracker(null, settings, onTrackChange);
+    startTracker(settings, onTrackChange, onSessionExpired);
+    if (settings.discordRPC) initDiscordRPC().catch(() => {});
   }
 
-  if (settings.discordRPC) initDiscordRPC().catch(() => {});
   setupAutostart(settings.autostart);
 
   if (!isDev) setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000);
