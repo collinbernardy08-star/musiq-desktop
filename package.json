@@ -54,8 +54,7 @@
     "win": {
       "target": ["nsis"],
       "icon": "assets/icon.ico",
-      "publisherName": "Mus-IQ",
-      "legalTrademarks": "Mus-IQ"
+      "publisherName": "Mus-IQ"
     },
     "mac": {
       "target": ["dmg"],
@@ -82,7 +81,7 @@
       "installerSidebar": "build/installer-sidebar.bmp",
       "uninstallerSidebar": "build/installer-sidebar.bmp",
       "installerHeader": "build/installer-header.bmp",
-      "script": "installer/musiq-installer.nsi"
+      "include": "installer/musiq.nsh"
     }
   }
 }
