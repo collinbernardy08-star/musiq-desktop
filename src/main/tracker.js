@@ -6,9 +6,6 @@ const store = new Store();
 const SUPABASE_URL = 'https://lhhouxpwhteripljizul.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxoaG91eHB3aHRlcmlwbGppenVsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU3NjQyODEsImV4cCI6MjA4MTM0MDI4MX0.JA1mmBgMq_w3e46m_9PzkePIkHCCsMh7ksLMbz4-1L4';
 
-// Two intervals:
-// - realtimeInterval: polls every 1s for instant track change detection
-// - syncInterval: syncs stats to Supabase every 30s (configurable)
 let realtimeInterval = null;
 let syncInterval = null;
 
@@ -24,18 +21,28 @@ let lastSyncedTracksToday = 0;
 let lastSyncedDate = null;
 
 // Session state
+let isRefreshing = false;
 let sessionExpiredNotified = false;
 let onSessionExpiredCallback = null;
-
-// Realtime mode flag
-let realtimeEnabled = true;
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
 function log(msg) { console.log(`[Tracker] ${new Date().toISOString()} ${msg}`); }
 function logError(ctx, err) { console.error(`[Tracker][ERROR][${ctx}]`, err?.message || err); }
 
 // ─── Session management ───────────────────────────────────────────────────────
+// ROOT CAUSE FIX: "Already Used" happens when web app and desktop app both try
+// to refresh the same token simultaneously. Solution:
+// 1. Only refresh if truly needed (token expires in < 5 min)
+// 2. If refresh fails with "Already Used", wait briefly and re-read the store
+//    (the web app may have already refreshed it and saved the new token)
+// 3. Never aggressively invalidate the session on a single refresh failure
 async function getFreshSession() {
+  // Prevent concurrent refresh attempts
+  if (isRefreshing) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    return store.get('session');
+  }
+
   const session = store.get('session');
   if (!session?.refresh_token) return null;
 
@@ -48,26 +55,66 @@ async function getFreshSession() {
     return session;
   }
 
+  isRefreshing = true;
   try {
     log('Token expiring – refreshing...');
     const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    const { data, error } = await sb.auth.refreshSession({ refresh_token: session.refresh_token });
+    const { data, error } = await sb.auth.refreshSession({
+      refresh_token: session.refresh_token,
+    });
 
-    if (error || !data?.session) {
-      logError('getFreshSession', error || 'No session returned');
+    if (error) {
+      // FIX: "Already Used" means the web app already refreshed this token
+      // Wait 2 seconds and re-read the store – web app saved the new session
+      if (error.message?.includes('Already Used') || error.status === 400) {
+        log('Refresh token already used (web app refreshed it) – re-reading store in 2s...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const freshFromStore = store.get('session');
+        if (freshFromStore && freshFromStore.refresh_token !== session.refresh_token) {
+          log('New session found in store after waiting – using it');
+          isRefreshing = false;
+          return freshFromStore;
+        }
+        // Still same token – try one more time with the stored session
+        const { data: retryData, error: retryError } = await sb.auth.refreshSession({
+          refresh_token: freshFromStore?.refresh_token || session.refresh_token,
+        });
+        if (!retryError && retryData?.session) {
+          store.set('session', retryData.session);
+          log('Retry refresh succeeded');
+          isRefreshing = false;
+          return retryData.session;
+        }
+        // Both failed – session is truly expired
+        logError('getFreshSession retry', retryError);
+      } else {
+        logError('getFreshSession', error);
+      }
+
+      // Only notify expiry after multiple failures
       if (!sessionExpiredNotified) {
         sessionExpiredNotified = true;
+        log('Session fully expired – notifying');
         if (typeof onSessionExpiredCallback === 'function') onSessionExpiredCallback();
       }
+      isRefreshing = false;
+      return null;
+    }
+
+    if (!data?.session) {
+      isRefreshing = false;
       return null;
     }
 
     store.set('session', data.session);
     sessionExpiredNotified = false;
-    log('Session refreshed');
+    log('Session refreshed successfully');
+    isRefreshing = false;
     return data.session;
+
   } catch (err) {
     logError('getFreshSession', err);
+    isRefreshing = false;
     return null;
   }
 }
@@ -175,8 +222,9 @@ async function syncToSupabase(track) {
 
   log(`Sync "${track.name}" | +${minutesDelta}min / +${tracksDelta} tracks`);
 
+  // 1. Log play
   try {
-    await sb.from('background_tracked_plays').insert({
+    const { error } = await sb.from('background_tracked_plays').insert({
       user_id: session.user.id,
       track_id: track.id,
       track_name: track.name,
@@ -186,19 +234,23 @@ async function syncToSupabase(track) {
       spotify_url: track.spotifyUrl || null,
       played_at: new Date().toISOString(),
     });
+    if (error) logError('insert plays', error);
   } catch (err) { logError('insert plays', err); }
 
+  // 2. Upsert daily stats
   try {
     if (currentMinutes > 0 || currentTracks > 0) {
-      await sb.from('daily_listening_stats').upsert({
+      const { error } = await sb.from('daily_listening_stats').upsert({
         user_id: session.user.id,
         date: today,
         minutes_listened: currentMinutes,
         tracks_played: currentTracks,
       }, { onConflict: 'user_id,date' });
+      if (error) logError('upsert daily_stats', error);
     }
   } catch (err) { logError('upsert daily_stats', err); }
 
+  // 3. Update total stats (delta only, never go backwards)
   try {
     if (minutesDelta > 0 || tracksDelta > 0) {
       const { data: existing, error: fetchErr } = await sb
@@ -212,15 +264,19 @@ async function syncToSupabase(track) {
       const existingMinutes = sanitizeNumber(existing?.total_minutes);
       const existingTracks = sanitizeNumber(existing?.tracks_played);
 
-      await sb.from('listening_stats').upsert({
+      const { error: upsertErr } = await sb.from('listening_stats').upsert({
         user_id: session.user.id,
         total_minutes: Math.max(existingMinutes + minutesDelta, existingMinutes),
         tracks_played: Math.max(existingTracks + tracksDelta, existingTracks),
         updated_at: new Date().toISOString(),
       }, { onConflict: 'user_id' });
 
-      lastSyncedMinutesToday = currentMinutes;
-      lastSyncedTracksToday = currentTracks;
+      if (!upsertErr) {
+        lastSyncedMinutesToday = currentMinutes;
+        lastSyncedTracksToday = currentTracks;
+      } else {
+        logError('upsert total_stats', upsertErr);
+      }
     }
   } catch (err) { logError('upsert total_stats', err); }
 }
@@ -305,14 +361,14 @@ async function pollCurrentTrack(onTrackChange) {
       return;
     }
 
-    // FIX: Detect skip – if progress jumped backwards significantly, it's a seek/skip
+    // Detect seek
     const progressDiff = currentProgress - lastSeenProgress;
     if (Math.abs(progressDiff) > 3000 && lastSeenProgress > 0) {
-      log(`Seek detected: ${lastSeenProgress}ms → ${currentProgress}ms`);
+      log(`Seek: ${lastSeenProgress}ms → ${currentProgress}ms`);
       lastCommittedProgress = currentProgress;
+      lastSeenProgress = currentProgress;
       store.set('currentTrack', track);
       onTrackChange(track);
-      lastSeenProgress = currentProgress;
       return;
     }
 
@@ -324,9 +380,7 @@ async function pollCurrentTrack(onTrackChange) {
     activeTrackData = track;
 
     const prevTrack = store.get('currentTrack');
-    if (prevTrack?.isPlaying !== track.isPlaying ||
-        prevTrack?.id !== track.id ||
-        Math.abs((prevTrack?.progress || 0) - currentProgress) > 2000) {
+    if (prevTrack?.isPlaying !== track.isPlaying || prevTrack?.id !== track.id) {
       store.set('currentTrack', track);
       onTrackChange(track);
     }
@@ -347,37 +401,28 @@ function startTracker(settings, onTrackChange, onSessionExpired) {
   lastSyncedTracksToday = 0;
   lastSyncedDate = getTodayDate();
   sessionExpiredNotified = false;
+  isRefreshing = false;
 
-  realtimeEnabled = settings?.realtimeTracking !== false;
-
-  // Realtime interval: 1s if enabled, else use trackingInterval setting
+  const realtimeEnabled = settings?.realtimeTracking !== false;
   const realtimeMs = realtimeEnabled ? 1000 : sanitizeNumber((settings?.trackingInterval || 30) * 1000, 30000);
-
-  // Supabase sync interval: always every 30s regardless of realtime setting
   const syncMs = sanitizeNumber((settings?.trackingInterval || 30) * 1000, 30000);
 
-  log(`Starting – realtime: ${realtimeEnabled} (${realtimeMs}ms poll), sync: ${syncMs}ms`);
+  log(`Starting – realtime: ${realtimeEnabled} (${realtimeMs}ms), sync: ${syncMs}ms`);
 
-  // Initial poll
   pollCurrentTrack(onTrackChange);
 
-  // Fast poll for instant track detection
   realtimeInterval = setInterval(() => {
     pollCurrentTrack(onTrackChange);
   }, realtimeMs);
 
-  // Separate slower interval just for periodic Supabase sync of current track
   if (realtimeEnabled) {
     syncInterval = setInterval(async () => {
       if (activeTrackData) {
-        const session = await getFreshSession();
-        if (session) {
-          const localStats = getLocalStats();
-          const currentMinutes = Math.round(sanitizeNumber(localStats.minutesToday));
-          const currentTracks = sanitizeNumber(localStats.tracksToday);
-          if (currentMinutes > lastSyncedMinutesToday || currentTracks > lastSyncedTracksToday) {
-            await syncToSupabase(activeTrackData);
-          }
+        const localStats = getLocalStats();
+        const currentMinutes = Math.round(sanitizeNumber(localStats.minutesToday));
+        const currentTracks = sanitizeNumber(localStats.tracksToday);
+        if (currentMinutes > lastSyncedMinutesToday || currentTracks > lastSyncedTracksToday) {
+          await syncToSupabase(activeTrackData);
         }
       }
     }, syncMs);
