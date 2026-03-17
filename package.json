@@ -1,6 +1,6 @@
 {
   "name": "MusIQ-Desktop-App",
-  "version": "1.1.8",
+  "version": "1.2.0",
   "description": "Mus-IQ Desktop App",
   "main": "src/main/main.js",
   "author": "Mus-IQ",
