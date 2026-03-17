@@ -1,0 +1,16 @@
+MIT License
+
+Copyright (c) 2025 Mus-IQ
+
+Hiermit wird jeder Person, die eine Kopie dieser Software und der zugehörigen 
+Dokumentationsdateien (die "Software") erhält, kostenlos die Erlaubnis erteilt, 
+ohne Einschränkung mit der Software zu handeln.
+
+Die Software wird "wie besehen" ohne jegliche ausdrückliche oder stillschweigende 
+Gewährleistung bereitgestellt.
+
+Mus-IQ Desktop trackt deinen Spotify-Verlauf lokal und synchronisiert ihn mit 
+deinem Mus-IQ Account unter mus-iq.com.
+
+Website: https://mus-iq.com
+Support: support@mus-iq.com

@@ -1,6 +1,6 @@
 {
   "name": "MusIQ-Desktop-App",
-  "version": "1.0.8",
+  "version": "1.0.2",
   "description": "Mus-IQ Desktop App",
   "main": "src/main/main.js",
   "author": "Mus-IQ",
@@ -34,6 +34,7 @@
   "build": {
     "appId": "com.musiq.desktop",
     "productName": "Mus-IQ",
+    "copyright": "© 2025 Mus-IQ. Alle Rechte vorbehalten.",
     "publish": {
       "provider": "github",
       "owner": "collinbernardy08-star",
@@ -41,7 +42,8 @@
       "releaseType": "release"
     },
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "files": [
       "src/main/**/*",
@@ -53,7 +55,9 @@
       "target": [
         "nsis"
       ],
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "publisherName": "Mus-IQ",
+      "legalTrademarks": "Mus-IQ"
     },
     "mac": {
       "target": [
@@ -73,9 +77,21 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/icon.ico"
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Mus-IQ Desktop",
+      "menuCategory": "Mus-IQ",
+      "deleteAppDataOnUninstall": false,
+      "displayLanguageSelector": false,
+      "language": "1031",
+      "installerSidebar": "build/installer-sidebar.bmp",
+      "uninstallerSidebar": "build/installer-sidebar.bmp",
+      "installerHeader": "build/installer-header.bmp",
+      "include": "installer/musiq.nsh"
     }
   }
 }
