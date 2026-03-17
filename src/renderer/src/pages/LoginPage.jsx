@@ -212,7 +212,7 @@ export default function LoginPage({ onLogin }) {
           💡 Verwende die gleichen Anmeldedaten wie auf{' '}
           <button
             style={{ ...styles.link, fontSize: 12 }}
-            onClick={() => window.electronAPI.openExternal('https://mus-iq.com')}
+            onClick={() => window.electronAPI.openExternal('https://mus-iq.lovable.app/')}
           >
             mus-iq.com
           </button>

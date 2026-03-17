@@ -457,7 +457,7 @@ export default function SettingsPage({ session, onLogout }) {
             <div style={styles.rowLabel}>Angemeldet als</div>
             <div style={styles.rowDesc}>{session?.user?.email || 'Unbekannt'}</div>
           </div>
-          <button style={styles.select} onClick={() => window.electronAPI.openExternal('https://mus-iq.com/settings')}>
+          <button style={styles.select} onClick={() => window.electronAPI.openExternal('https://mus-iq.lovable.app/settings')}>
             Web ↗
           </button>
         </div>
