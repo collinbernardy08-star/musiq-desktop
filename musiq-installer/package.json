@@ -1,0 +1,32 @@
+{
+  "name": "musiq-installer",
+  "version": "1.0.0",
+  "description": "Mus-IQ Desktop Installer UI",
+  "main": "src/main.js",
+  "author": "Mus-IQ",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "npx electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.musiq.installer",
+    "productName": "Mus-IQ Installer",
+    "directories": { "output": "dist" },
+    "files": ["src/**/*", "assets/**/*"],
+    "extraResources": [
+      {
+        "from": "payload/Mus-IQ-Core-Setup.exe",
+        "to": "Mus-IQ-Core-Setup.exe"
+      }
+    ],
+    "win": {
+      "target": [{ "target": "portable", "arch": ["x64"] }],
+      "icon": "assets/icon.ico"
+    }
+  }
+}

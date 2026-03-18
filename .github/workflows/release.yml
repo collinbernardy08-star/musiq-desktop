@@ -25,6 +25,7 @@ jobs:
         run: |
           if (Test-Path "package-lock.json") { Remove-Item "package-lock.json" }
           if (Test-Path "src/renderer/package-lock.json") { Remove-Item "src/renderer/package-lock.json" }
+          if (Test-Path "musiq-installer/package-lock.json") { Remove-Item "musiq-installer/package-lock.json" }
 
       - name: Install main dependencies
         run: npm install --legacy-peer-deps
@@ -35,7 +36,29 @@ jobs:
       - name: Build renderer
         run: npm run build --prefix src/renderer
 
-      - name: Build & Publish
+      - name: Build NSIS Silent Installer
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder --win --config.nsis.oneClick=true --config.nsis.allowToChangeInstallationDirectory=false --publish never
+
+      - name: Copy silent installer to musiq-installer payload
+        run: |
+          $exe = Get-ChildItem -Path "dist" -Filter "*.exe" | Where-Object { $_.Name -notlike "*blockmap*" } | Select-Object -First 1
+          Write-Host "Copying $($exe.FullName) to musiq-installer/payload/"
+          New-Item -ItemType Directory -Force -Path "musiq-installer/payload"
+          Copy-Item $exe.FullName "musiq-installer/payload/Mus-IQ-Core-Setup.exe"
+
+      - name: Install musiq-installer dependencies
+        run: npm install --legacy-peer-deps --prefix musiq-installer
+
+      - name: Build custom Electron installer
+        run: npx electron-builder --win --projectDir musiq-installer --publish never
+
+      - name: Publish main app and custom installer to GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          npx electron-builder --win --publish always
+          $installer = Get-ChildItem -Path "musiq-installer/dist" -Filter "*.exe" | Select-Object -First 1
+          Write-Host "Custom installer: $($installer.FullName)"
+          gh release upload "v$((Get-Content package.json | ConvertFrom-Json).version)" $installer.FullName --clobber
